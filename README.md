@@ -1,76 +1,56 @@
-# AnimoHub Proxy API (Python / Flask)
+# AnimoHub Proxy API v2 (Python / Flask)
 
-Sirf 2 files: `app.py` aur `requirements.txt` — jaisa tumne manga.
+`app.py` + `requirements.txt` — sirf animohubpro.com ke liye, pichle version
+se yeh improvements:
 
-## Kyun scraper nahi, proxy hai
-Tumhari 7 HTML files check ki thi — unme anime cards ka koi data nahi hai
-(koi `/anime/...` link static markup me exist nahi karta), kyunki site JS se
-cards runtime pe render karti hai. Raw HTML scraping (BeautifulSoup se bhi)
-isliye khaali result dega. Jo kaam karta hai: site ka WordPress REST API
-public hai (`wp-json/wp/v2/anime`, `/genre`, `/anime_type`) — confirmed
-working (Android app me real titles aaye the: Blue Box, David, Oshi No Ko).
-`app.py` usi REST API ko server-side call karke poster URLs resolve karta
-hai (`_embed`), BeautifulSoup se HTML tags/entities clean karta hai, aur
-stable JSON deta hai.
+## Naya kya hai
+- **`/home` dashboard** — banners (WordPress sticky posts, ya fallback
+  newest), latest, latest movies, latest series — sab **parallel** (4
+  threads ek saath) fetch hoti hain, isliye request fast hai.
+- **In-memory caching** (120 sec TTL) — same query baar-baar upstream
+  WordPress ko hit nahi karti, response fast + upstream-friendly.
+- **Automatic retries** — upstream 502/503/504 pe khud 3 baar retry karta
+  hai (network blips handle ho jaate hain).
+- **Real pagination metadata** — WordPress REST response headers
+  (`X-WP-Total`, `X-WP-TotalPages`) se `total` / `total_pages` ab response
+  me aate hain, isliye tum "load more" / page count sahi se dikha sakte ho.
+- **`/detail?slug=`** — ab id ke alawa slug se bhi anime dhoond sakte ho.
+- **`/health`** — upstream reachable hai ya nahi, quick check ke liye.
+- **`/episodes` honest 501** — fake data ya crash dene ke bajaye clean error
+  deta hai batake ki yeh abhi implement nahi hua aur kyun.
 
-## Run locally
+## Jo add NAHI kiya (jaan-bujh kar)
+Tumne "stream resolver / intro-outro / enc-dec bridge" bhi manga tha —
+woh is version me nahi hai, kyunki:
+- animohubpro.com ke watch/episode page ka koi data ab tak nahi mila
+  (koi HTML upload nahi hui thi jisme player/m3u8/iframe ho)
+- Koi evidence nahi hai ki yeh site `enc-dec.app` jaisa koi bridge use
+  karti hai — HiAnime wale request me jo pattern tha (megacloud + enc-dec)
+  woh ek doosri site ka architecture tha, animohubpro ka nahi
+
+Fake decrypt logic likhna sirf non-functional code dega. Jaise hi tum ek
+watch-page ka Network -> XHR response bhejoge, `/episodes` aur ek naya
+`/stream` endpoint isi file me properly wire kar dunga.
+
+## Run
 ```bash
 pip install -r requirements.txt
 python app.py
-# server chalu ho jayega http://localhost:5000 pe
-curl "http://localhost:5000/list?type=latest"
+curl "http://localhost:5000/home"
 ```
 
 ## Endpoints
-
 | Endpoint | Description |
 |---|---|
-| `GET /list?type=latest` | Home feed |
-| `GET /list?type=movie&page=1` | Movie tab (anime_type=27) |
-| `GET /list?type=series&page=1` | Series tab (anime_type=26) |
-| `GET /genres` | All genres |
-| `GET /genre?id=17&page=1` | Anime filtered by genre |
-| `GET /types` | All anime_type terms |
-| `GET /detail?id=123` | Full anime detail + description |
+| `GET /home` | Dashboard: banners + latest + latest movies + latest series |
+| `GET /list?type=latest\|movie\|series&page=1` | Paginated listing |
+| `GET /genres` / `GET /genre?id=17` | Genre list / filter |
+| `GET /types` | anime_type taxonomy list |
+| `GET /detail?id=123` or `?slug=blue-box` | Full detail + description |
 | `GET /search?q=naruto` | Search |
-
-Sample response (`/list`, `/genre`, `/search`):
-```json
-{
-  "success": true,
-  "data": [
-    {
-      "id": 123,
-      "slug": "blue-box",
-      "title": "Blue Box",
-      "excerpt": "...",
-      "poster": "https://animohubpro.com/wp-content/uploads/.../poster.jpg",
-      "link": "https://animohubpro.com/blue-box/",
-      "genre_ids": [3, 8],
-      "type_ids": [26],
-      "post_status": "publish"
-    }
-  ],
-  "page": 1,
-  "per_page": 20
-}
-```
+| `GET /health` | Upstream reachability check |
+| `GET /episodes?id=` | Honest 501 — not implemented yet, explains why |
 
 ## Deploy
-`app.py` module-level pe `app` (Flask instance) expose karta hai, isliye
-kisi bhi Python/WSGI host pe chalega:
-- **Render / Railway**: repo connect karo, start command `gunicorn app:app`
-  (gunicorn ko `requirements.txt` me add kar dena agar yeh use karna hai).
-- **Vercel (Python runtime)**: is repo ko import karo, Vercel `app.py` me
-  `app` object khud detect kar leta hai.
-- **VPS**: `pip install -r requirements.txt && gunicorn -w 4 -b 0.0.0.0:5000 app:app`
-
-## Abhi bhi missing (tumhara input chahiye)
-1. **Real "airing status" field** (Ongoing/Completed) — WordPress ka apna
-   `status` field sirf publish/draft hai.
-2. **Episode list + direct stream URL** — koi uploaded HTML watch page nahi
-   thi, isliye `/detail` sirf placeholder `episodes: []` deta hai.
-
-Fix karne ka tarika: Chrome DevTools -> Network -> XHR tab, ek watch page
-kholo, episode list/stream ke liye jo JSON request jaati hai uska response
-copy karke bhejo — `app.py` ke `detail()` function me wire kar dunga.
+`app` object module-level pe hai — Render/Railway (`gunicorn app:app`),
+Vercel Python runtime, ya kisi bhi VPS pe chalega.
