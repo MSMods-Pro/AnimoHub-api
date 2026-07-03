@@ -10,9 +10,15 @@ app = Flask(__name__)
 CORS(app)
 
 WP_BASE = "https://animohubpro.com/wp-json/wp/v2/"
+WP_ROOT = "https://animohubpro.com/wp-json/"
 MOVIE_TYPE_ID = 27
 SERIES_TYPE_ID = 26
 CACHE_TTL = 120
+CANDIDATE_EPISODE_ROUTES = ["episode", "episodes", "ep", "anime-episode", "anime_episode"]
+CANDIDATE_STREAM_FIELDS = [
+    "video_url", "stream_url", "embed_url", "player_url", "source_url",
+    "m3u8", "video", "url", "download_url",
+]
 
 _cache = {}
 _session = requests.Session()
@@ -65,6 +71,73 @@ def wp_get(path, params=None, use_cache=True):
     if use_cache and resp.status_code == 200:
         cache_set(cache_key, result)
     return result
+
+
+def wp_root_routes(use_cache=True):
+    cache_key = "__wp_root_routes__"
+    if use_cache:
+        cached = cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+    try:
+        resp = _session.get(WP_ROOT, timeout=15)
+        data = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        return None, 502, str(e)
+
+    routes = list((data or {}).get("routes", {}).keys())
+    result = (routes, resp.status_code, None)
+    if use_cache and resp.status_code == 200:
+        cache_set(cache_key, result, ttl=600)
+    return result
+
+
+def wp_get_any(path, params=None):
+    """Like wp_get but for arbitrary/custom post type routes we're probing —
+    doesn't assume the route exists, just reports what happened."""
+    params = dict(params or {})
+    params["_embed"] = "true"
+    url = WP_BASE + path.lstrip("/")
+    try:
+        resp = _session.get(url, params=params, timeout=15)
+    except requests.RequestException as e:
+        return None, 502, str(e)
+    try:
+        data = resp.json()
+    except ValueError:
+        return None, resp.status_code, "Non-JSON response"
+    return data, resp.status_code, None
+
+
+def find_episode_route():
+    """Look at the real WP route list and guess which one is episodes."""
+    routes, code, err = wp_root_routes()
+    if code != 200 or not routes:
+        return None, CANDIDATE_EPISODE_ROUTES
+
+    matches = [
+        r for r in routes
+        if "/wp/v2/" in r and any(kw in r.lower() for kw in ["episode", "/ep/", "-ep"])
+    ]
+    guesses = [m.split("/wp/v2/")[-1].strip("()").split("/")[0] for m in matches]
+    ordered = list(dict.fromkeys(guesses + CANDIDATE_EPISODE_ROUTES))
+    return matches, ordered
+
+
+def find_stream_field(obj):
+    """Search a post/meta dict for anything that looks like a playable link."""
+    if not isinstance(obj, dict):
+        return None
+    for key in CANDIDATE_STREAM_FIELDS:
+        if key in obj and isinstance(obj[key], str) and obj[key].startswith("http"):
+            return {"field": key, "url": obj[key]}
+    meta = obj.get("meta")
+    if isinstance(meta, dict):
+        for key in CANDIDATE_STREAM_FIELDS:
+            if key in meta and isinstance(meta[key], str) and meta[key].startswith("http"):
+                return {"field": f"meta.{key}", "url": meta[key]}
+    return None
 
 
 def clean_html(raw_html):
@@ -143,11 +216,16 @@ def index():
             "GET /detail?id=123",
             "GET /detail?slug=blue-box",
             "GET /search?q=naruto&per_page=20",
+            "GET /discover",
+            "GET /episodes?id=123",
+            "GET /stream?episode_id=456",
             "GET /health",
         ],
         "note": (
             "Proxies + normalizes animohubpro.com wp-json REST API. "
-            "Episode/stream data is not available yet — see /episodes."
+            "/episodes and /stream auto-discover the real episode/video "
+            "route via /discover instead of hardcoding a guess — call "
+            "/discover first if they 404."
         ),
     })
 
@@ -292,17 +370,105 @@ def search():
     return ok(items, query=q, total=meta.get("total"), total_pages=meta.get("total_pages"))
 
 
+@app.route("/discover")
+def discover():
+    routes, code, err = wp_root_routes(use_cache=False)
+    if code != 200 or routes is None:
+        return fail("Failed to fetch wp-json root index", code or 502, err)
+
+    interesting = [
+        r for r in routes
+        if "/wp/v2/" in r and not any(
+            skip in r for skip in ["/users", "/comments", "/settings", "/media", "/pages", "/posts",
+                                    "/categories", "/tags", "/taxonomies", "/types", "/statuses",
+                                    "/blocks", "/templates", "/menu", "/search", "/anime", "/genre"]
+        )
+    ]
+
+    return ok({
+        "all_routes": routes,
+        "possibly_relevant": interesting,
+    }, note=(
+        "This is the real, live list of every REST route animohubpro.com "
+        "exposes. 'possibly_relevant' filters out the routes we already "
+        "know about (anime/genre/anime_type/core WP stuff) — if there's an "
+        "episode/video/server custom post type, it'll show up here. Send me "
+        "whatever shows up and I'll wire /episodes and /stream to the real "
+        "route instead of guessing."
+    ))
+
+
 @app.route("/episodes")
 def episodes():
     anime_id = request.args.get("id", type=int)
     if not anime_id:
         return fail("Missing ?id=", 400)
+
+    matched_routes, guesses = find_episode_route()
+
+    tried = []
+    for route in guesses:
+        for param_name in ["anime", "anime_id", "parent", "post"]:
+            data, code, err = wp_get_any(route, {param_name: anime_id, "per_page": 100})
+            tried.append({"route": route, "param": param_name, "status": code})
+            if code == 200 and isinstance(data, list) and len(data) > 0:
+                episodes_out = []
+                for ep in data:
+                    stream = find_stream_field(ep)
+                    episodes_out.append({
+                        "id": ep.get("id"),
+                        "title": clean_html((ep.get("title") or {}).get("rendered", "")) or ep.get("slug"),
+                        "number": (ep.get("meta") or {}).get("episode_number") or ep.get("menu_order"),
+                        "stream": stream,
+                    })
+                return ok(episodes_out, matched_route=route, matched_param=param_name)
+
     return fail(
-        "Episode listing isn't available yet. animohubpro.com's watch pages "
-        "render episodes/streams via client-side JS with no public REST "
-        "equivalent found so far. Send a watch-page Network->XHR response "
-        "and this endpoint will be implemented for real instead of faked.",
-        501,
+        "No episode data found automatically. animohubpro.com's watch pages "
+        "render episodes/streams via client-side JS, and no matching public "
+        "REST route was found among the guesses tried. Call /discover to "
+        "see every real route the site exposes — if an episode/video post "
+        "type is listed there, tell me its exact name and this endpoint "
+        "will be wired to it precisely instead of guessing.",
+        404,
+        {"routes_found_in_wp_json": matched_routes, "guesses_tried": tried},
+    )
+
+
+@app.route("/stream")
+def stream():
+    episode_id = request.args.get("episode_id", type=int)
+    route = request.args.get("route")
+
+    if not episode_id:
+        return fail("Missing ?episode_id= (get one from /episodes)", 400)
+
+    routes_to_try = [route] if route else find_episode_route()[1]
+
+    for r in routes_to_try:
+        data, code, err = wp_get_any(f"{r}/{episode_id}")
+        if code == 200 and isinstance(data, dict):
+            stream_info = find_stream_field(data)
+            if stream_info:
+                return ok({
+                    "episode_id": episode_id,
+                    "route": r,
+                    "stream": stream_info,
+                    "raw_keys_available": list(data.keys()),
+                })
+            return fail(
+                "Found the episode post but no obvious stream/video URL "
+                "field on it. Check 'raw_keys_available' below and tell me "
+                "which field actually holds the video link.",
+                404,
+                {"route": r, "raw_keys_available": list(data.keys())},
+            )
+
+    return fail(
+        "Couldn't resolve a stream for this episode_id. Call /episodes?id= "
+        "first to confirm the right route, or /discover to see all real "
+        "routes on the site.",
+        404,
     )
 
 

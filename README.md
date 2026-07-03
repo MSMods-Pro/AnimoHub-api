@@ -3,34 +3,30 @@
 `app.py` + `requirements.txt` — sirf animohubpro.com ke liye, pichle version
 se yeh improvements:
 
-## Naya kya hai
-- **`/home` dashboard** — banners (WordPress sticky posts, ya fallback
-  newest), latest, latest movies, latest series — sab **parallel** (4
-  threads ek saath) fetch hoti hain, isliye request fast hai.
-- **In-memory caching** (120 sec TTL) — same query baar-baar upstream
-  WordPress ko hit nahi karti, response fast + upstream-friendly.
-- **Automatic retries** — upstream 502/503/504 pe khud 3 baar retry karta
-  hai (network blips handle ho jaate hain).
-- **Real pagination metadata** — WordPress REST response headers
-  (`X-WP-Total`, `X-WP-TotalPages`) se `total` / `total_pages` ab response
-  me aate hain, isliye tum "load more" / page count sahi se dikha sakte ho.
-- **`/detail?slug=`** — ab id ke alawa slug se bhi anime dhoond sakte ho.
-- **`/health`** — upstream reachable hai ya nahi, quick check ke liye.
-- **`/episodes` honest 501** — fake data ya crash dene ke bajaye clean error
-  deta hai batake ki yeh abhi implement nahi hua aur kyun.
+## Naya kya hai (v2)
+- **`/discover`** — animohubpro.com ka real `/wp-json/` root index fetch
+  karta hai jo **har** available REST route list karta hai. Har WordPress
+  site publicly yeh expose karti hai. Agar site me episode/video ka koi
+  custom post type hai, yeh yahan dikh jayega — bina blind guess kiye.
+- **`/episodes?id=`** — `/discover` se mile clues + common naming patterns
+  (`episode`, `episodes`, `ep`, etc.) try karta hai, jo bhi real data
+  deta hai wahi use karta hai. Kuch na mile toh clean 404 with exactly
+  kya-kya try kiya gaya woh detail me deta hai (guess nahi banata).
+- **`/stream?episode_id=&route=`** — episode post ke andar common
+  field-names (`video_url`, `stream_url`, `m3u8`, `embed_url`, etc., top
+  level aur `meta` dono me) dhoondta hai. Mil jaye toh URL deta hai, na
+  mile toh us post ke saare real field-names deta hai taaki tum bata sako
+  asli field kaunsa hai.
+- **`/home` dashboard**, **caching**, **retries**, **real pagination**,
+  **`/detail?slug=`**, **`/health`** — pichle version se already the.
 
-## Jo add NAHI kiya (jaan-bujh kar)
-Tumne "stream resolver / intro-outro / enc-dec bridge" bhi manga tha —
-woh is version me nahi hai, kyunki:
-- animohubpro.com ke watch/episode page ka koi data ab tak nahi mila
-  (koi HTML upload nahi hui thi jisme player/m3u8/iframe ho)
-- Koi evidence nahi hai ki yeh site `enc-dec.app` jaisa koi bridge use
-  karti hai — HiAnime wale request me jo pattern tha (megacloud + enc-dec)
-  woh ek doosri site ka architecture tha, animohubpro ka nahi
+## Yeh abhi bhi "fake resolver" nahi hai
+`/episodes` aur `/stream` **guess-and-verify** karte hain against live data
+— agar wahan kuch nahi milta, saaf 404 + exactly kya try kiya gaya woh
+batate hain, kabhi bhi placeholder/fake JSON nahi dete. Agar `/discover`
+output me episode-jaisa koi route dikhe, mujhe bhejo — main usko seedha
+hardcode kar dunga taaki guessing bhi na karni pade.
 
-Fake decrypt logic likhna sirf non-functional code dega. Jaise hi tum ek
-watch-page ka Network -> XHR response bhejoge, `/episodes` aur ek naya
-`/stream` endpoint isi file me properly wire kar dunga.
 
 ## Run
 ```bash
@@ -48,8 +44,10 @@ curl "http://localhost:5000/home"
 | `GET /types` | anime_type taxonomy list |
 | `GET /detail?id=123` or `?slug=blue-box` | Full detail + description |
 | `GET /search?q=naruto` | Search |
+| `GET /discover` | Real, live list of every REST route the site exposes |
+| `GET /episodes?id=` | Auto-discovers + returns episodes for an anime |
+| `GET /stream?episode_id=&route=` | Auto-discovers a playable stream URL for an episode |
 | `GET /health` | Upstream reachability check |
-| `GET /episodes?id=` | Honest 501 — not implemented yet, explains why |
 
 ## Deploy
 `app` object module-level pe hai — Render/Railway (`gunicorn app:app`),
